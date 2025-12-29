@@ -1,0 +1,5 @@
+{
+  "name": "PhotoGenix AI Studio",
+  "description": "Next-gen AI photo studio that transforms poorly taken photos into professional, 3D-like masterpieces using Gemini 2.5.",
+  "requestFramePermissions": []
+}
