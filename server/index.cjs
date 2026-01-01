@@ -3,6 +3,17 @@
 // - Adds RAW upload support (dcraw + ImageMagick via Docker image)
 // - Safe CORS (supports comma-separated origins)
 
+// server/index.cjs (CommonJS - Render/Vercel friendly)
+
+// server/index.cjs (CommonJS - Render/Vercel friendly)
+// - Keeps GEMINI_API_KEY on the server
+// - Adds RAW upload support (dcraw + ImageMagick via Docker image) via ./raw.routes.cjs
+// - Safe CORS (supports comma-separated origins)
+//
+// IMPORTANT:
+// - RAW endpoints are implemented in server/raw.routes.cjs and mounted at /api/raw/*
+// - This file should NOT mount raw router inside callGeminiImage (that caused route/middleware ordering bugs)
+
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
@@ -36,10 +47,12 @@ const ALLOWED_ORIGINS = CORS_ORIGIN.split(",")
   .filter(Boolean);
 
 if (!GEMINI_API_KEY) {
-  console.warn("[photogenix-backend] Missing GEMINI_API_KEY (set it in Render env vars)");
+  console.warn(
+    "[photogenix-backend] Missing GEMINI_API_KEY (set it in Render env vars)"
+  );
 }
 
-// Base64 endpoints (JSON) — keep a limit, but RAW should use multipart below.
+// Base64 endpoints (JSON) — keep a limit, but RAW uses multipart in raw.routes.cjs.
 const JSON_LIMIT = process.env.JSON_LIMIT || "35mb";
 app.use(express.json({ limit: JSON_LIMIT }));
 app.use(express.urlencoded({ extended: true, limit: JSON_LIMIT }));
@@ -59,16 +72,38 @@ app.use(
   })
 );
 
-const createRawRouter = require("./raw.routes.cjs");
+// ------------------------
+// Helpers / wrappers
+// ------------------------
+function ok(res, data) {
+  return res.json({ ok: true, data });
+}
+function fail(res, status, error, details) {
+  return res.status(status).json({ ok: false, error, details });
+}
+function requireBodyFields(body, fields) {
+  for (const f of fields) {
+    if (body?.[f] === undefined || body?.[f] === null || body?.[f] === "") {
+      throw new Error(`MISSING_FIELD_${f}`);
+    }
+  }
+}
 
-// mount: /api/raw/preview and /api/raw/develop
-app.use("/api/raw", createRawRouter({ callGeminiImage }));
+function getAI() {
+  if (!GEMINI_API_KEY) throw new Error("MISSING_GEMINI_API_KEY");
+  return new GoogleGenAI({ apiKey: GEMINI_API_KEY });
+}
+
+// ------------------------
 // Health check
+// ------------------------
 app.get("/api/health", (_req, res) =>
   res.json({ ok: true, ts: Date.now(), origins: ALLOWED_ORIGINS })
 );
 
+// ------------------------
 // Simple in-memory rate limiter (per IP)
+// ------------------------
 const BUCKET = new Map();
 const WINDOW_MS = 60_000;
 const MAX_REQ_PER_WINDOW = Number(process.env.RATE_LIMIT_PER_MIN || 45);
@@ -99,28 +134,12 @@ function rateLimit(req, res, next) {
   next();
 }
 
+// Apply limiter to ALL /api routes (including /api/raw/*)
 app.use("/api", rateLimit);
 
-function ok(res, data) {
-  return res.json({ ok: true, data });
-}
-function fail(res, status, error, details) {
-  return res.status(status).json({ ok: false, error, details });
-}
-function requireBodyFields(body, fields) {
-  for (const f of fields) {
-    if (body?.[f] === undefined || body?.[f] === null || body?.[f] === "") {
-      throw new Error(`MISSING_FIELD_${f}`);
-    }
-  }
-}
-
-function getAI() {
-  if (!GEMINI_API_KEY) throw new Error("MISSING_GEMINI_API_KEY");
-  return new GoogleGenAI({ apiKey: GEMINI_API_KEY });
-}
-
-// ---------- Gemini image calls ----------
+// -------------------------------------------------------------
+// Gemini image calls
+// -------------------------------------------------------------
 const MODEL_NAME = process.env.GEMINI_IMAGE_MODEL || "gemini-2.5-flash-image";
 
 const ASPECT_RATIO_MAP = {
@@ -156,9 +175,27 @@ async function callGeminiImage(parts, aspectRatio) {
   throw new Error("AI_NO_IMAGE_RETURNED");
 }
 
-// ---------- RAW conversion (dcraw + ImageMagick) ----------
-// This expects your Render service to be built from Docker with:
-//   apt-get install -y dcraw imagemagick
+// -------------------------------------------------------------
+// RAW Router Mount (MUST be mounted once, at top-level)
+// -------------------------------------------------------------
+// This provides:
+//   POST /api/raw/preview
+//   POST /api/raw/develop
+//   GET  /api/raw/diag
+//
+// NOTE: Do not define /api/raw/* in this file if using raw.routes.cjs
+const createRawRouter = require("./raw.routes.cjs");
+app.use("/api/raw", createRawRouter({ callGeminiImage }));
+
+// -------------------------------------------------------------
+// Legacy RAW helpers (kept for reference, NOT mounted here)
+// -------------------------------------------------------------
+// You previously had RAW upload + dcraw/convert logic in this file.
+// raw.routes.cjs now owns the live endpoints. Keeping these helpers
+// avoids accidental loss during incident debugging.
+//
+// If you want to fully remove later, you can safely delete this block.
+
 const upload = multer({
   storage: multer.diskStorage({
     destination: (_req, _file, cb) => {
@@ -172,7 +209,9 @@ const upload = multer({
       cb(null, `${Date.now()}_${id}${ext}`);
     },
   }),
-  limits: { fileSize: Number(process.env.MAX_UPLOAD_BYTES || 50 * 1024 * 1024) }, // 50MB default
+  limits: {
+    fileSize: Number(process.env.MAX_UPLOAD_BYTES || 50 * 1024 * 1024),
+  }, // 50MB default
 });
 
 function run(cmd, args, { timeoutMs = 60_000 } = {}) {
@@ -202,28 +241,23 @@ function run(cmd, args, { timeoutMs = 60_000 } = {}) {
 /**
  * Convert RAW to JPEG using:
  *  dcraw -> PPM/TIFF -> ImageMagick convert -> JPEG
+ *
+ * (Not used by live routes; raw.routes.cjs has its own buffer-based pipeline.)
  */
 async function rawToJpegBase64(rawPath) {
   const base = rawPath.replace(/\.[^.]+$/, "");
   const ppmPath = `${base}.ppm`;
   const jpgPath = `${base}.jpg`;
 
-  // dcraw:
-  // -c: write to stdout (but we write to ppm file for stability)
-  // -w: use camera white balance
-  // -q 3: AHD interpolation
-  // -6: 16-bit output (better for convert)
-  await run("dcraw", ["-w", "-q", "3", "-6", "-c", rawPath], { timeoutMs: 90_000 })
+  await run("dcraw", ["-w", "-q", "3", "-6", "-c", rawPath], {
+    timeoutMs: 90_000,
+  })
     .then(({ out }) => fs.writeFileSync(ppmPath, out, "binary"))
     .catch(async (e) => {
-      // some dcraw builds don't like stdout capture; fallback to dcraw writing files
-      // (dcraw without -c writes a .ppm next to input)
       await run("dcraw", ["-w", "-q", "3", "-6", rawPath], { timeoutMs: 90_000 });
-      // dcraw output is <base>.ppm
       if (!fs.existsSync(ppmPath)) throw e;
     });
 
-  // convert PPM -> JPEG (strip metadata)
   await run("convert", [ppmPath, "-strip", "-quality", "92", jpgPath], {
     timeoutMs: 90_000,
   });
@@ -231,33 +265,19 @@ async function rawToJpegBase64(rawPath) {
   const buf = fs.readFileSync(jpgPath);
   const b64 = buf.toString("base64");
 
-  // cleanup
-  try { fs.unlinkSync(ppmPath); } catch {}
-  try { fs.unlinkSync(jpgPath); } catch {}
+  try {
+    fs.unlinkSync(ppmPath);
+  } catch {}
+  try {
+    fs.unlinkSync(jpgPath);
+  } catch {}
 
   return b64;
 }
 
-// ---------- Routes ----------
-
-
-// (1) Convert RAW to JPEG preview (for UI + to avoid browser RAW limitations)
-//app.post("/api/raw/preview", upload.single("file"), async (req, res) => {
-  //try {
-  //  if (!req.file?.path) throw new Error("MISSING_FILE");
-  //  const jpegBase64 = await rawToJpegBase64(req.file.path);
-   // cleanup uploaded raw
-   // try { fs.unlinkSync(req.file.path); } catch {}
-   // return ok(res, { jpegBase64 });
- // } catch (e) {
- //   return fail(res, 400, e?.message || "RAW_PREVIEW_FAILED");
-//  }
-//});
-
-
-
-
+// -------------------------------------------------------------
 // Existing JSON endpoints (JPEG/base64)
+// -------------------------------------------------------------
 app.post("/api/ai/transform-image", async (req, res) => {
   try {
     const { imageBase64, instruction, aspectRatio } = req.body || {};
@@ -407,14 +427,13 @@ app.post("/api/ai/analyze-image", async (req, res) => {
 // Global error handler (keeps logs helpful on Render)
 app.use((err, _req, res, _next) => {
   const msg = String(err?.message || err || "SERVER_ERROR");
-  if (msg === "CORS_NOT_ALLOWED") {
-    return res.status(403).json({ ok: false, error: "CORS_NOT_ALLOWED" });
-  }
   console.error("[photogenix-backend] error:", msg);
   return res.status(500).json({ ok: false, error: "SERVER_ERROR" });
 });
 
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`[photogenix-backend] listening on http://localhost:${PORT}`);
-  console.log(`[photogenix-backend] CORS_ORIGIN=${ALLOWED_ORIGINS.join(",")}`);
+  console.log(
+    `[photogenix-backend] CORS_ORIGIN=${ALLOWED_ORIGINS.join(",") || "(none)"}`
+  );
 });
