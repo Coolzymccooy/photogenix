@@ -11,6 +11,19 @@
 //   apt-get install -y dcraw imagemagick
 // -------------------------------------------------------------
 
+// server/raw.routes.cjs
+// -------------------------------------------------------------
+// RAW endpoints for Photogenix (Docker / Render ready)
+//
+// Routes:
+//   POST /api/raw/preview  -> multipart RAW -> JPEG preview
+//   POST /api/raw/develop  -> multipart RAW -> JPEG -> Gemini
+//   GET  /api/raw/diag     -> verify dcraw + imagemagick exist
+//
+// REQUIREMENTS (Docker image):
+//   apt-get install -y dcraw imagemagick
+// -------------------------------------------------------------
+
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
@@ -169,6 +182,7 @@ module.exports = function createRawRouter({ callGeminiImage }) {
 
       return ok(res, {
         jpegBase64: jpgBuf.toString("base64"),
+        jpegUrl: `data:image/jpeg;base64,${jpgBuf.toString("base64")}`,
       });
     } catch (e) {
       safeUnlink(req.file?.path);
@@ -203,6 +217,8 @@ module.exports = function createRawRouter({ callGeminiImage }) {
       return ok(res, {
         imageBase64,
         previewJpegBase64: jpegBase64,
+        developedUrl: `data:image/jpeg;base64,${imageBase64}`,
+        previewUrl: `data:image/jpeg;base64,${jpegBase64}`,
       });
     } catch (e) {
       safeUnlink(req.file?.path);
