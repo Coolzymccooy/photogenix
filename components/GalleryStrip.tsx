@@ -1,7 +1,15 @@
-
-import React from 'react';
-import { ProjectItem } from '../types';
-import { Plus, X, FolderInput, Video, Image as ImageIcon, Binary, Upload, Check } from 'lucide-react';
+import React from "react";
+import { ProjectItem } from "../types";
+import {
+  FolderInput,
+  Image as ImageIcon,
+  Plus,
+  Video,
+  X,
+  Binary,
+  Upload,
+  Check,
+} from "lucide-react";
 
 interface GalleryStripProps {
   items: ProjectItem[];
@@ -20,114 +28,138 @@ export const GalleryStrip: React.FC<GalleryStripProps> = ({
   onAddImage,
   onAddVideo,
   onAddFolder,
-  onRemove
+  onRemove,
 }) => {
   return (
-    <div className="w-full bg-base border-t border-line p-4 shrink-0 z-40 relative">
+    <div className="w-full shrink-0 border-t border-line bg-base p-4 relative z-40">
       <div className="flex items-center gap-3 overflow-x-auto no-scrollbar pb-2">
-        
-        {/* Unified Upload Options */}
-        <div className="flex gap-2 mr-2">
-            <button
-                onClick={onAddImage}
-                className="flex-shrink-0 w-20 h-20 rounded-sm border border-line hover:border-signal hover:bg-surface text-zinc-500 hover:text-white flex flex-col items-center justify-center transition-all group font-mono"
-            >
-                <ImageIcon size={18} className="mb-1" />
-                <span className="text-[8px] font-bold tracking-widest">ADD_IMG</span>
-            </button>
-            <button
-                onClick={onAddVideo}
-                className="flex-shrink-0 w-20 h-20 rounded-sm border border-line hover:border-signal hover:bg-surface text-zinc-500 hover:text-white flex flex-col items-center justify-center transition-all group font-mono"
-            >
-                <Video size={18} className="mb-1" />
-                <span className="text-[8px] font-bold tracking-widest">ADD_VID</span>
-            </button>
+        {/* Upload options */}
+        <div className="flex items-center gap-2 mr-2">
+          <button
+            onClick={onAddFolder}
+            className="w-16 h-16 rounded-xl border border-line bg-card hover:bg-card/80 transition flex flex-col items-center justify-center gap-1 text-white/80"
+            title="Add a folder"
+          >
+            <FolderInput size={18} />
+            <span className="text-[8px] font-bold tracking-widest">ADD_FOLDER</span>
+          </button>
+
+          <button
+            onClick={onAddImage}
+            className="w-16 h-16 rounded-xl border border-line bg-card hover:bg-card/80 transition flex flex-col items-center justify-center gap-1 text-white/80"
+            title="Add images (JPG/PNG/RAW)"
+          >
+            <ImageIcon size={18} />
+            <span className="text-[8px] font-bold tracking-widest">ADD_IMG</span>
+          </button>
+
+          <button
+            onClick={onAddVideo}
+            className="w-16 h-16 rounded-xl border border-line bg-card hover:bg-card/80 transition flex flex-col items-center justify-center gap-1 text-white/80"
+            title="Add videos"
+          >
+            <Video size={18} />
+            <span className="text-[8px] font-bold tracking-widest">ADD_VID</span>
+          </button>
         </div>
 
-        <div className="w-px h-12 bg-line mx-1"></div>
+        <div className="w-px h-12 bg-line mx-1" />
 
-        {/* Gallery Items */}
+        {/* Gallery items */}
         {items.map((item) => {
-          const displayUrl = item.processedUrl || item.originalUrl;
+          const displayUrl = (item as any).processedUrl || (item as any).originalUrl || "";
           const isSelected = selectedIds.includes(item.id);
-          const isVideo = item.mediaType === 'video';
-          const isDeveloping = item.status === 'developing';
-          const isProcessing = item.status === 'processing';
-          
+          const isVideo = (item as any).mediaType === "video";
+          const isRaw = Boolean((item as any).isRaw);
+          const status = String((item as any).status || "idle");
+          const isDeveloping = status === "developing";
+          const isProcessing = status === "processing";
+
           return (
-            <div key={item.id} className="relative group flex-shrink-0">
-               <button
-                onClick={(e) => onSelect(item.id, e.metaKey || e.ctrlKey)}
-                className={`relative w-20 h-20 rounded-sm overflow-hidden border transition-all duration-150 bg-black ${
-                  isSelected 
-                    ? 'border-signal ring-1 ring-signal/50' 
-                    : 'border-line opacity-60 hover:opacity-100'
-                }`}
+            <div key={item.id} className="relative group shrink-0">
+              <button
+                onClick={(e) => onSelect(item.id, (e as any).shiftKey || (e as any).metaKey || (e as any).ctrlKey)}
+                className={[
+                  "w-16 h-16 rounded-xl overflow-hidden border transition relative",
+                  isSelected ? "border-signal ring-1 ring-signal/40" : "border-line hover:border-white/20",
+                ].join(" ")}
+                title={(item as any).name || (item as any).fileName || "asset"}
               >
-                {isVideo ? (
-                  <div className="w-full h-full bg-black relative">
-                     <video 
-                       src={displayUrl}
-                       className="w-full h-full object-cover opacity-80"
-                       muted
-                       loop
-                     />
-                     <div className="absolute top-1 right-1">
-                        <Video size={10} className="text-white opacity-50" />
-                     </div>
-                  </div>
-                ) : (
-                  <div className="relative w-full h-full">
-                    <img 
-                      src={displayUrl} 
-                      alt="" 
-                      className="w-full h-full object-cover"
-                      onError={(e) => {
-                        (e.target as HTMLImageElement).src = `data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI4MCIgaGVpZ2h0PSI4MCI+PHJlY3Qgd2lkdGg9IjgwIiBoZWlnaHQ9IjgwIiBmaWxsPSIjMTgxODEiLz48dGV4dCB4PSI0MCIgeT0iNDAiIGZpbGw9IiM2MzY2RjEiIGZvbnQtZmFtaWx5PSJNb25vIiBmb250LXNpemU9IjgiIHRleHQtYW5jaG9yPSJtaWRkbGUiPkVSUk9SPC90ZXh0Pjwvc3ZnPg==`;
-                      }}
-                    />
-                    {isSelected && (
-                      <div className="absolute top-1 left-1 bg-signal rounded-full p-0.5">
-                        <Check size={8} className="text-white" />
+                {displayUrl ? (
+                  isVideo ? (
+                    <div className="w-full h-full bg-black relative">
+                      <video
+                        src={displayUrl}
+                        className="w-full h-full object-cover opacity-80"
+                        muted
+                        loop
+                        playsInline
+                      />
+                      <div className="absolute top-1 right-1">
+                        <Video size={10} className="text-white/70" />
                       </div>
-                    )}
-                    {item.isRaw && item.status === 'done' && (
-                       <div className="absolute bottom-0 right-0 left-0 bg-signal/80 text-[6px] font-bold text-white py-0.5 text-center uppercase tracking-tighter">
-                         DEVELOPED
-                       </div>
-                    )}
+                    </div>
+                  ) : (
+                    <img src={displayUrl} className="w-full h-full object-cover" alt="" />
+                  )
+                ) : (
+                  <div className="w-full h-full flex items-center justify-center bg-black/30">
+                    {isRaw ? <Binary size={18} className="text-white/70" /> : <Upload size={18} className="text-white/70" />}
                   </div>
                 )}
-                
+
+                {/* RAW badge */}
+                {isRaw && (
+                  <div className="absolute bottom-1 left-1 px-1.5 py-0.5 rounded bg-black/70 border border-white/10">
+                    <span className="text-[8px] font-mono font-bold tracking-widest text-white/90">RAW</span>
+                  </div>
+                )}
+
+                {/* status overlay */}
                 {(isProcessing || isDeveloping) && (
-                  <div className="absolute inset-0 bg-black/60 flex flex-col items-center justify-center backdrop-blur-[1px] z-10">
-                    <div className="w-4 h-4 border border-signal border-t-transparent rounded-full animate-spin mb-1"></div>
-                    <span className="text-[6px] text-signal font-bold font-mono">
-                      {isDeveloping ? 'NEURAL_DEV' : 'SYNCING'}
-                    </span>
+                  <div className="absolute inset-0 bg-black/55 flex items-center justify-center z-10">
+                    <div className="flex items-center gap-1.5 px-2 py-1 rounded-lg bg-black/60 border border-white/10">
+                      <div className="w-2 h-2 rounded-full bg-signal animate-pulse" />
+                      <span className="text-[8px] font-mono font-bold tracking-widest text-white/90">
+                        {isDeveloping ? "NEURAL_DEV" : "SYNCING"}
+                      </span>
+                    </div>
                   </div>
                 )}
-                
-                {item.status === 'error' && (
-                   <div className="absolute inset-0 bg-red-950/40 flex items-center justify-center border-2 border-red-500/50 z-10">
-                      <X size={12} className="text-red-500" />
-                   </div>
+
+                {status === "done" && (
+                  <div className="absolute top-1 left-1">
+                    <Check size={12} className="text-emerald-400 drop-shadow" />
+                  </div>
+                )}
+
+                {status === "error" && (
+                  <div className="absolute inset-0 bg-red-950/40 flex items-center justify-center border-2 border-red-500/40 z-10">
+                    <X size={12} className="text-red-400" />
+                  </div>
                 )}
               </button>
 
-              <button 
-                onClick={(e) => { e.stopPropagation(); onRemove(item.id); }}
-                className="absolute -top-1 -right-1 bg-base text-zinc-500 hover:text-red-500 rounded-full p-1 border border-line opacity-0 group-hover:opacity-100 transition-opacity z-20 shadow-xl"
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onRemove(item.id);
+                }}
+                className="absolute -top-1 -right-1 w-5 h-5 rounded-full bg-base border border-line text-white/70 flex items-center justify-center opacity-0 group-hover:opacity-100 transition shadow-xl"
+                title="Remove"
               >
-                <X size={8} />
+                <X size={10} />
               </button>
             </div>
           );
         })}
       </div>
+
       {selectedIds.length > 1 && (
-        <div className="absolute -top-10 left-4 bg-signal px-3 py-1.5 rounded-sm flex items-center gap-2 shadow-2xl animate-in slide-in-from-bottom-2">
-           <span className="text-[9px] font-mono font-bold text-white tracking-widest">{selectedIds.length}_ASSETS_SELECTED</span>
+        <div className="absolute -top-10 left-4 bg-signal px-3 py-1 rounded-xl flex items-center gap-2 shadow-2xl animate-in slide-in-from-bottom-2">
+          <span className="text-[9px] font-mono font-bold text-white tracking-widest">
+            {selectedIds.length}_ASSETS_SELECTED
+          </span>
         </div>
       )}
     </div>
