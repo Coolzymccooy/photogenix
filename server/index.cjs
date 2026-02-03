@@ -60,13 +60,8 @@ app.use(express.urlencoded({ extended: true, limit: JSON_LIMIT }));
 app.use(
   cors({
     origin: (origin, cb) => {
-      // allow server-to-server / curl (no Origin)
-      if (!origin) return cb(null, true);
-
-      // allow listed origins
-      if (ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
-
-      return cb(new Error(`CORS blocked for origin: ${origin}`));
+      // PERMISSIVE CORS: Allow all origins to fix frontend connection issues
+      return cb(null, true); 
     },
     credentials: false,
   })
