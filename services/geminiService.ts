@@ -25,7 +25,7 @@ type ApiRes<T> =
   | { ok: true; data: T }
   | { ok: false; error: string; details?: any };
 
-const API_BASE = (import.meta.env.VITE_API_BASE || "/api").replace(/\/$/, "");
+const API_BASE = "https://photogenix-3.onrender.com/api"; // Direct to Render to bypass Vercel limits
 
 function cleanBase64(dataUrlOrB64: string) {
   // strips "data:image/...;base64," if present
