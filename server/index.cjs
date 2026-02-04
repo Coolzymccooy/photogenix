@@ -28,7 +28,9 @@ if (fs.existsSync(envPath)) {
   require("dotenv").config();
 }
 
-console.log("GEMINI_API_KEY loaded?", !!process.env.GEMINI_API_KEY);
+const key = process.env.GEMINI_API_KEY || "";
+console.log("DEBUG: GEMINI_API_KEY loaded?", !!key);
+console.log("DEBUG: GEMINI_API_KEY start:", key.substring(0, 8) + "..."); // Print first 8 chars to verify update
 
 const express = require("express");
 const cors = require("cors");
