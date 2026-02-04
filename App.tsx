@@ -25,6 +25,8 @@ import { AILens } from './components/AILens';
 import { Button } from './components/ui/Button';
 
 
+import exifr from 'exifr'; // For instant RAW preview extraction
+
 // ✅ RAW: use multipart to avoid base64 payload blowups
 import {
   transformImage,
@@ -203,16 +205,28 @@ const App: React.FC = () => {
         const id = Math.random().toString(36).substr(2, 9);
         const ext = file.name.split('.').pop()?.toLowerCase() || '';
         const isRaw = RAW_EXTENSIONS.includes(ext);
+        let previewUrl = URL.createObjectURL(file);
 
-        // keep RAW file in memory for multipart upload
-        if (isRaw) rawFileByIdRef.current.set(id, file);
+        // INSTANT RAW PREVIEW: Extract embedded JPEG locally
+        if (isRaw) {
+          rawFileByIdRef.current.set(id, file);
+          try {
+            // exifr extracts the thumbnail/preview image buffer
+            const thumb = await exifr.thumbnail(file); 
+            if (thumb) {
+              previewUrl = URL.createObjectURL(new Blob([thumb], { type: 'image/jpeg' }));
+            }
+          } catch (err) {
+            console.warn("Could not extract local preview:", err);
+          }
+        }
 
         await StorageService.persistBlob(id, 'orig', file);
 
         newItems.push({
           id,
           mediaType: type,
-          originalUrl: URL.createObjectURL(file),
+          originalUrl: previewUrl,
           processedUrl: null,
           status: isRaw ? 'developing' : 'idle',
           history: [],
@@ -226,7 +240,7 @@ const App: React.FC = () => {
       setSelectedIds([newItems[0].id]);
       setSessionReady(true);
 
-      // Auto-develop RAW in the background (but controlled concurrency)
+      // Auto-develop RAW in the background (slower full conversion)
       void autoDevelopRawItems(newItems.filter(i => i.isRaw));
     };
 
