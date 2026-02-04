@@ -7,15 +7,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Copy backend package files first (better caching)
-COPY server/package*.json ./
+# Copy root package files (Monorepo structure)
+COPY package*.json ./
 RUN npm ci --omit=dev || npm install --omit=dev
 
 # Copy the backend code
-COPY server/. .
+COPY server/. ./server/
+COPY .env ./server/ 
 
-ENV NODE_ENV=production
-ENV PORT=5051
-
-EXPOSE 5051
-CMD ["node", "index.js"]
+# Adjust CMD to point to the file in server/
+CMD ["node", "server/index.cjs"]
