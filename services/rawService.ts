@@ -12,8 +12,8 @@ type ApiOk<T> = { ok: true; data: T };
 type ApiFail = { ok: false; error: string; details?: any };
 type ApiRes<T> = ApiOk<T> | ApiFail;
 
-const API_BASE = (import.meta.env.VITE_API_BASE_URL || "").replace(/\/$/, "");
-const apiUrl = (p: string) => (API_BASE ? `${API_BASE}${p}` : p);
+const API_BASE = "https://photogenix-3.onrender.com"; // Direct connection to Render to bypass Vercel 10s timeout
+const apiUrl = (p: string) => `${API_BASE}${p}`;
 
 
 async function postForm<T>(path: string, form: FormData, timeoutMs = 180000): Promise<T> {

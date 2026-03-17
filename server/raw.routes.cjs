@@ -132,10 +132,11 @@ module.exports = function createRawRouter({ callGeminiImage }) {
     //  -q3 AHD interpolation
     //  -6  16-bit output
     //  -T  write TIFF
-    //  -O  output file
+    //  (Note: -O flag removed because older dcraw versions on Debian Bullseye don't support it.
+    //   dcraw writes to {base}.tiff by default when -T is used.)
     await run(
       "dcraw",
-      ["-w", "-q", "3", "-6", "-T", "-O", tiffPath, rawPath],
+      ["-w", "-q", "3", "-6", "-T", rawPath],
       { timeoutMs: 180_000 }
     );
 
