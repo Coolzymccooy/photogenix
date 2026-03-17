@@ -7,7 +7,7 @@
     "dev:frontend": "vite",
     "dev:backend": "node server/index.cjs",
     "dev": "concurrently -n FRONTEND,BACKEND -c auto \"npm run dev:frontend\" \"npm run dev:backend\"",
-    "dev:desktop": "concurrently -n BACKEND,VITE,ELECTRON -c blue,green,yellow \"npm run dev:backend\" \"npm run dev:frontend\" \"wait-on http://localhost:3080 && electron .\"",
+    "dev:desktop": "concurrently -k -n BACKEND,VITE,ELECTRON -c blue,green,yellow \"npm run dev:backend\" \"npm run dev:frontend\" \"wait-on http://localhost:3080 && npx electron .\"",
     "build": "vite build",
     "build:desktop": "npm run build && electron-builder --config electron-builder.json5",
     "build:android": "npm run build && npx cap sync android",

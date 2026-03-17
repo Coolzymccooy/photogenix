@@ -11,32 +11,28 @@ let backendProcess = null;
 const BACKEND_PORT = 5051;
 
 function startBackend() {
-  const serverPath = isDev
-    ? path.join(__dirname, "..", "server", "index.cjs")
-    : path.join(process.resourcesPath, "server", "index.cjs");
+  // In dev mode, backend is started separately by concurrently (npm run dev:desktop)
+  // Only auto-start backend in packaged production builds
+  if (isDev) {
+    console.log("[backend] Dev mode — backend managed by concurrently, skipping spawn");
+    return;
+  }
 
-  backendProcess = spawn(process.execPath.replace("electron", "node"), [serverPath], {
+  const serverPath = path.join(process.resourcesPath, "server", "index.cjs");
+
+  // Use "node" from PATH — works on Windows, Mac, Linux
+  const nodeCmd = process.platform === "win32" ? "node.exe" : "node";
+
+  backendProcess = spawn(nodeCmd, [serverPath], {
     env: {
       ...process.env,
       PORT: String(BACKEND_PORT),
-      CORS_ORIGIN: `http://localhost:${BACKEND_PORT}`,
-      NODE_ENV: isDev ? "development" : "production",
+      CORS_ORIGIN: `http://localhost:3080`,
+      NODE_ENV: "production",
     },
     stdio: ["ignore", "pipe", "pipe"],
+    shell: false,
   });
-
-  // Try node directly if the above fails (packaged apps bundle node differently)
-  if (!backendProcess.pid) {
-    backendProcess = spawn("node", [serverPath], {
-      env: {
-        ...process.env,
-        PORT: String(BACKEND_PORT),
-        CORS_ORIGIN: `http://localhost:${BACKEND_PORT}`,
-        NODE_ENV: isDev ? "development" : "production",
-      },
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-  }
 
   backendProcess.stdout?.on("data", (d) => {
     console.log("[backend]", d.toString().trim());
@@ -200,8 +196,9 @@ ipcMain.handle("app:getPlatform", () => process.platform);
 app.whenReady().then(() => {
   startBackend();
 
-  // Give backend a moment to start, then create window
-  setTimeout(createWindow, 1500);
+  // In dev mode backend is already running; in prod give it a moment to start
+  const delay = isDev ? 500 : 2000;
+  setTimeout(createWindow, delay);
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) {
