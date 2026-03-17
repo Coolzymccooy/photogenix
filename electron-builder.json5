@@ -1,0 +1,59 @@
+{
+  "$schema": "https://raw.githubusercontent.com/electron-userland/electron-builder/master/packages/app-builder-lib/scheme.json",
+  "appId": "com.photogenix.studio",
+  "productName": "PhotoGenix AI Studio",
+  "copyright": "Copyright © 2026 PhotoGenix",
+  "directories": {
+    "output": "release",
+    "buildResources": "public"
+  },
+  "files": [
+    "dist/**/*",
+    "electron/**/*",
+    "server/**/*",
+    "node_modules/**/*",
+    "!node_modules/.cache",
+    "!node_modules/electron",
+    "!node_modules/electron-builder"
+  ],
+  "extraResources": [
+    {
+      "from": "server/",
+      "to": "server/",
+      "filter": ["**/*", "!.env", "!node_modules"]
+    }
+  ],
+  "win": {
+    "target": [
+      {
+        "target": "nsis",
+        "arch": ["x64"]
+      }
+    ],
+    "icon": "public/icon.png",
+    "artifactName": "${productName}-${version}-Setup.${ext}"
+  },
+  "nsis": {
+    "oneClick": false,
+    "perMachine": false,
+    "allowToChangeInstallationDirectory": true,
+    "installerIcon": "public/icon.png",
+    "uninstallerIcon": "public/icon.png",
+    "installerHeaderIcon": "public/icon.png",
+    "createDesktopShortcut": true,
+    "createStartMenuShortcut": true,
+    "shortcutName": "PhotoGenix AI Studio"
+  },
+  "mac": {
+    "target": ["dmg", "zip"],
+    "icon": "public/icon.png",
+    "category": "public.app-category.photography",
+    "artifactName": "${productName}-${version}.${ext}"
+  },
+  "linux": {
+    "target": ["AppImage", "deb"],
+    "icon": "public/icon.png",
+    "category": "Graphics",
+    "artifactName": "${productName}-${version}.${ext}"
+  }
+}

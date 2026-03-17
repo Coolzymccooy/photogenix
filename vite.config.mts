@@ -20,6 +20,12 @@ export default defineConfig(() => {
         },
       },
     },
+    // Electron needs relative paths for file:// protocol in production
+    base: process.env.ELECTRON === "true" ? "./" : "/",
+    build: {
+      outDir: "dist",
+      emptyOutDir: true,
+    },
     plugins: [react()],
     resolve: {
       alias: {

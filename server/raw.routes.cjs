@@ -199,7 +199,7 @@ module.exports = function createRawRouter({ callGeminiImage }) {
       const aspectRatio = req.body?.aspectRatio;
       const prompt =
         req.body?.prompt ||
-        "ACT AS RAW DEVELOPER. Recover highlights & shadows, preserve skin tones, natural color science. IMAGE ONLY.";
+        "ACT AS RAW DEVELOPER. Recover highlights and shadows with natural tone mapping. Preserve skin tones, natural color science, and all facial features exactly as captured. Apply professional white balance and exposure correction. IMAGE ONLY.";
 
       const jpgBuf = await rawToJpegBuffer(req.file.path);
       const jpegBase64 = jpgBuf.toString("base64");

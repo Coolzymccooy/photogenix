@@ -28,8 +28,9 @@ type ApiRes<T> = ApiOk<T> | ApiFail;
  * Back-compat:
  * - callers might pass "/ai/..." or "/raw/..." -> we auto-prefix "/api"
  */
-// ✅ API base (Vercel -> Render). If empty, we fall back to relative /api (works with Vite proxy locally)
+// API base (Vercel -> Render). If empty, we fall back to relative /api (works with Vite proxy locally)
 const API_BASE = (import.meta as any).env?.VITE_API_BASE_URL || "";
+const API_KEY = (import.meta as any).env?.VITE_APP_API_KEY || "";
 
 // Builds absolute URL if API_BASE is set, otherwise keeps relative (local dev proxy)
 function apiUrl(path: string) {
@@ -37,10 +38,16 @@ function apiUrl(path: string) {
   return `${API_BASE}${path.startsWith("/") ? path : `/${path}`}`;
 }
 
+function authHeaders(): Record<string, string> {
+  const headers: Record<string, string> = {};
+  if (API_KEY) headers["x-api-key"] = API_KEY;
+  return headers;
+}
+
 async function postJson<T>(path: string, body: any): Promise<T> {
   const r = await fetch(apiUrl(path), {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...authHeaders() },
     body: JSON.stringify(body),
   });
 
@@ -52,7 +59,11 @@ async function postJson<T>(path: string, body: any): Promise<T> {
 }
 
 async function postForm<T>(path: string, form: FormData): Promise<T> {
-  const r = await fetch(apiUrl(path), { method: "POST", body: form });
+  const r = await fetch(apiUrl(path), {
+    method: "POST",
+    headers: { ...authHeaders() },
+    body: form,
+  });
   const j = await r.json().catch(() => ({}));
   if (!r.ok || j?.ok === false) {
     throw new Error(j?.error || `HTTP_${r.status}`);
@@ -62,11 +73,57 @@ async function postForm<T>(path: string, form: FormData): Promise<T> {
 
 
 /**
- * Fetch any URL (blob:, data:, http:) and convert to base64 (no prefix)
+ * Downscale image to max 4K resolution before upload.
+ * Reduces base64 size by up to 80% for large images, dramatically cutting
+ * network transfer time to Gemini.
+ */
+const MAX_AI_DIMENSION = 3840; // 4K
+
+async function compressForAI(blob: Blob): Promise<Blob> {
+  // Only compress raster images
+  if (!blob.type.startsWith('image/')) return blob;
+
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      const { width, height } = img;
+
+      // Skip if already within bounds
+      if (width <= MAX_AI_DIMENSION && height <= MAX_AI_DIMENSION) {
+        resolve(blob);
+        URL.revokeObjectURL(img.src);
+        return;
+      }
+
+      const scale = Math.min(MAX_AI_DIMENSION / width, MAX_AI_DIMENSION / height);
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.round(width * scale);
+      canvas.height = Math.round(height * scale);
+
+      const ctx = canvas.getContext('2d')!;
+      ctx.imageSmoothingQuality = 'high';
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      URL.revokeObjectURL(img.src);
+
+      canvas.toBlob(
+        (result) => resolve(result || blob),
+        'image/jpeg',
+        0.92
+      );
+    };
+    img.onerror = () => resolve(blob);
+    img.src = URL.createObjectURL(blob);
+  });
+}
+
+/**
+ * Fetch any URL (blob:, data:, http:) and convert to base64 (no prefix).
+ * Auto-resizes large images to 4K max before encoding.
  */
 async function urlToBase64(url: string): Promise<string> {
   const resp = await fetch(url);
-  const blob = await resp.blob();
+  let blob = await resp.blob();
+  blob = await compressForAI(blob);
   return blobToBase64(blob);
 }
 
@@ -234,6 +291,44 @@ export async function analyzeImage(sourceUrl: string): Promise<any> {
  * Keep this if other files import it (even if it's mock)
  */
 export async function transformVideoMock(_videoUrl: string): Promise<string> {
-  // You can replace with real server video pipeline later
   return _videoUrl;
+}
+
+/**
+ * ------------------------------
+ * Local Sharp processing (instant, no AI)
+ * Maps tool IDs to backend /api/local/* endpoints.
+ * These run via Sharp on the server — sub-second response.
+ * ------------------------------
+ */
+
+const LOCAL_TOOL_ROUTES: Record<string, string> = {
+  'enhance': '/api/local/enhance',
+  'clean': '/api/local/denoise',
+  'sharpness': '/api/local/sharpen',
+  'watermark': '/api/local/watermark',
+  'smart-crop': '/api/local/crop',
+};
+
+export async function localProcess(
+  sourceUrl: string,
+  toolId: string,
+  extra?: { text?: string; strength?: number; aspectRatio?: string; width?: number; height?: number }
+): Promise<string> {
+  const route = LOCAL_TOOL_ROUTES[toolId];
+  if (!route) {
+    throw new Error(`No local route for tool: ${toolId}`);
+  }
+
+  const imageBase64 = await urlToBase64(sourceUrl);
+
+  const body: any = { imageBase64 };
+  if (extra?.text) body.text = extra.text;
+  if (extra?.strength) body.strength = extra.strength;
+  if (extra?.aspectRatio) body.aspectRatio = extra.aspectRatio;
+  if (extra?.width) body.width = extra.width;
+  if (extra?.height) body.height = extra.height;
+
+  const data = await postJson<{ imageBase64: string }>(route, body);
+  return base64ToDataUrl(data.imageBase64, "image/jpeg");
 }

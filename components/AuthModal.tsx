@@ -28,27 +28,25 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, onSuccess
     setError(null);
     setLoading(true);
 
-    setTimeout(() => {
-      try {
-        if (authMode === 'reset') {
-          if (!email) throw new Error("IDENTIFIER_MISSING");
-          setResetSent(true);
+    try {
+      if (authMode === 'reset') {
+        if (!email) throw new Error("IDENTIFIER_MISSING");
+        setResetSent(true);
+      } else {
+        let user;
+        if (authMode === 'login') {
+          user = await AuthService.login(email, password);
         } else {
-          let user;
-          if (authMode === 'login') {
-            user = AuthService.login(email, password);
-          } else {
-            if (!name) throw new Error("NAME_IDENTIFIER_MISSING");
-            user = AuthService.register(email, password, name);
-          }
-          onSuccess(user);
+          if (!name) throw new Error("NAME_IDENTIFIER_MISSING");
+          user = await AuthService.register(email, password, name);
         }
-      } catch (err: any) {
-        setError(err.message.toUpperCase());
-      } finally {
-        setLoading(false);
+        onSuccess(user);
       }
-    }, 1200);
+    } catch (err: any) {
+      setError(err.message.toUpperCase());
+    } finally {
+      setLoading(false);
+    }
   };
 
   const getTitle = () => {

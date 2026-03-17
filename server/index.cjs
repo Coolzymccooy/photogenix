@@ -1,24 +1,11 @@
 // server/index.cjs (CommonJS - Render/Vercel friendly)
 // - Keeps GEMINI_API_KEY on the server
-// - Adds RAW upload support (dcraw + ImageMagick via Docker image)
-// - Safe CORS (supports comma-separated origins)
-
-// server/index.cjs (CommonJS - Render/Vercel friendly)
-
-// server/index.cjs (CommonJS - Render/Vercel friendly)
-// - Keeps GEMINI_API_KEY on the server
 // - Adds RAW upload support (dcraw + ImageMagick via Docker image) via ./raw.routes.cjs
 // - Safe CORS (supports comma-separated origins)
-//
-// IMPORTANT:
-// - RAW endpoints are implemented in server/raw.routes.cjs and mounted at /api/raw/*
-// - This file should NOT mount raw router inside callGeminiImage (that caused route/middleware ordering bugs)
+// - API key authentication for all AI endpoints
 
 const fs = require("fs");
 const path = require("path");
-const os = require("os");
-const crypto = require("crypto");
-const { spawn } = require("child_process");
 
 // Load local env only if it exists (Render uses dashboard env vars)
 const envPath = path.join(process.cwd(), "server", ".env");
@@ -32,13 +19,13 @@ console.log("GEMINI_API_KEY loaded?", !!process.env.GEMINI_API_KEY);
 
 const express = require("express");
 const cors = require("cors");
-const multer = require("multer");
 const { GoogleGenAI, Type } = require("@google/genai");
 
 const app = express();
 
 const PORT = Number(process.env.PORT || 5051);
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+const APP_API_KEY = process.env.APP_API_KEY;
 
 // Render/Vercel origins (comma-separated supported)
 const CORS_ORIGIN = process.env.CORS_ORIGIN || "http://localhost:3080";
@@ -62,10 +49,7 @@ app.use(
     origin: (origin, cb) => {
       // allow server-to-server / curl (no Origin)
       if (!origin) return cb(null, true);
-
-      // allow listed origins
       if (ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
-
       return cb(new Error(`CORS blocked for origin: ${origin}`));
     },
     credentials: false,
@@ -94,8 +78,40 @@ function getAI() {
   return new GoogleGenAI({ apiKey: GEMINI_API_KEY });
 }
 
+/**
+ * Validate that base64 string is actually an image (check magic bytes).
+ * Prevents arbitrary data from being sent to Gemini.
+ */
+function validateImageBase64(b64) {
+  if (!b64 || typeof b64 !== "string" || b64.length < 8) {
+    throw new Error("INVALID_IMAGE_DATA");
+  }
+  // Decode first 4 bytes to check magic numbers
+  const head = Buffer.from(b64.slice(0, 16), "base64");
+  const isJPEG = head[0] === 0xff && head[1] === 0xd8;
+  const isPNG = head[0] === 0x89 && head[1] === 0x50 && head[2] === 0x4e && head[3] === 0x47;
+  const isWebP = head[0] === 0x52 && head[1] === 0x49 && head[2] === 0x46 && head[3] === 0x46;
+  const isBMP = head[0] === 0x42 && head[1] === 0x4d;
+  const isGIF = head[0] === 0x47 && head[1] === 0x49 && head[2] === 0x46;
+  if (!isJPEG && !isPNG && !isWebP && !isBMP && !isGIF) {
+    throw new Error("INVALID_IMAGE_FORMAT");
+  }
+}
+
 // ------------------------
-// Health check
+// API key authentication middleware
+// Protects AI endpoints from unauthorized access.
+// If APP_API_KEY is set, clients must send x-api-key header.
+// ------------------------
+function requireApiKey(req, res, next) {
+  if (!APP_API_KEY) return next(); // skip if not configured
+  const clientKey = req.headers["x-api-key"];
+  if (clientKey === APP_API_KEY) return next();
+  return res.status(401).json({ ok: false, error: "UNAUTHORIZED" });
+}
+
+// ------------------------
+// Health check (no auth required)
 // ------------------------
 app.get("/api/health", (_req, res) =>
   res.json({ ok: true, ts: Date.now(), origins: ALLOWED_ORIGINS })
@@ -134,8 +150,11 @@ function rateLimit(req, res, next) {
   next();
 }
 
-// Apply limiter to ALL /api routes (including /api/raw/*)
+// Apply limiter + auth to ALL /api routes
 app.use("/api", rateLimit);
+app.use("/api/ai", requireApiKey);
+app.use("/api/local", requireApiKey);
+app.use("/api/raw", requireApiKey);
 
 // -------------------------------------------------------------
 // Gemini image calls
@@ -153,6 +172,9 @@ const ASPECT_RATIO_MAP = {
   "4:3": "4:3",
 };
 
+// Face/subject preservation directive prepended to all image generation prompts
+const FACE_PRESERVATION_DIRECTIVE = `CRITICAL CONSTRAINT: You MUST preserve all human faces, facial features, body proportions, and anatomical details EXACTLY as they appear in the original image. Do NOT alter, distort, exaggerate, smooth, reshape, or stylize any face, skin texture, eye shape, nose, mouth, hair, or body part unless the user EXPLICITLY requests facial modification. Maintain the subject's identity, expression, and likeness with photographic accuracy. This applies to ALL people in the image.`;
+
 async function callGeminiImage(parts, aspectRatio) {
   const ai = getAI();
 
@@ -161,9 +183,17 @@ async function callGeminiImage(parts, aspectRatio) {
     config.imageConfig = { aspectRatio: ASPECT_RATIO_MAP[aspectRatio] };
   }
 
+  // Inject face preservation into any text prompt
+  const enhancedParts = parts.map((p) => {
+    if (p.text) {
+      return { text: `${FACE_PRESERVATION_DIRECTIVE}\n\n${p.text}` };
+    }
+    return p;
+  });
+
   const response = await ai.models.generateContent({
     model: MODEL_NAME,
-    contents: { parts },
+    contents: { parts: enhancedParts },
     config,
   });
 
@@ -176,112 +206,25 @@ async function callGeminiImage(parts, aspectRatio) {
 }
 
 // -------------------------------------------------------------
-// RAW Router Mount (MUST be mounted once, at top-level)
+// Local Sharp processing (instant, no AI) — mounted BEFORE AI routes
 // -------------------------------------------------------------
-// This provides:
-//   POST /api/raw/preview
-//   POST /api/raw/develop
-//   GET  /api/raw/diag
-//
-// NOTE: Do not define /api/raw/* in this file if using raw.routes.cjs
+const createLocalRouter = require("./local.routes.cjs");
+app.use("/api/local", createLocalRouter());
+
+// -------------------------------------------------------------
+// RAW Router Mount
+// -------------------------------------------------------------
 const createRawRouter = require("./raw.routes.cjs");
 app.use("/api/raw", createRawRouter({ callGeminiImage }));
 
 // -------------------------------------------------------------
-// Legacy RAW helpers (kept for reference, NOT mounted here)
-// -------------------------------------------------------------
-// You previously had RAW upload + dcraw/convert logic in this file.
-// raw.routes.cjs now owns the live endpoints. Keeping these helpers
-// avoids accidental loss during incident debugging.
-//
-// If you want to fully remove later, you can safely delete this block.
-
-const upload = multer({
-  storage: multer.diskStorage({
-    destination: (_req, _file, cb) => {
-      const dir = path.join(os.tmpdir(), "photogenix");
-      fs.mkdirSync(dir, { recursive: true });
-      cb(null, dir);
-    },
-    filename: (_req, file, cb) => {
-      const id = crypto.randomBytes(8).toString("hex");
-      const ext = path.extname(file.originalname || "").slice(0, 12);
-      cb(null, `${Date.now()}_${id}${ext}`);
-    },
-  }),
-  limits: {
-    fileSize: Number(process.env.MAX_UPLOAD_BYTES || 50 * 1024 * 1024),
-  }, // 50MB default
-});
-
-function run(cmd, args, { timeoutMs = 60_000 } = {}) {
-  return new Promise((resolve, reject) => {
-    const p = spawn(cmd, args, { stdio: ["ignore", "pipe", "pipe"] });
-    let out = "";
-    let err = "";
-    const t = setTimeout(() => {
-      p.kill("SIGKILL");
-      reject(new Error(`${cmd}_TIMEOUT`));
-    }, timeoutMs);
-
-    p.stdout.on("data", (d) => (out += d.toString()));
-    p.stderr.on("data", (d) => (err += d.toString()));
-    p.on("error", (e) => {
-      clearTimeout(t);
-      reject(e);
-    });
-    p.on("close", (code) => {
-      clearTimeout(t);
-      if (code === 0) return resolve({ out, err });
-      reject(new Error(`${cmd}_FAILED_${code}: ${err || out}`));
-    });
-  });
-}
-
-/**
- * Convert RAW to JPEG using:
- *  dcraw -> PPM/TIFF -> ImageMagick convert -> JPEG
- *
- * (Not used by live routes; raw.routes.cjs has its own buffer-based pipeline.)
- */
-async function rawToJpegBase64(rawPath) {
-  const base = rawPath.replace(/\.[^.]+$/, "");
-  const ppmPath = `${base}.ppm`;
-  const jpgPath = `${base}.jpg`;
-
-  await run("dcraw", ["-w", "-q", "3", "-6", "-c", rawPath], {
-    timeoutMs: 90_000,
-  })
-    .then(({ out }) => fs.writeFileSync(ppmPath, out, "binary"))
-    .catch(async (e) => {
-      await run("dcraw", ["-w", "-q", "3", "-6", rawPath], { timeoutMs: 90_000 });
-      if (!fs.existsSync(ppmPath)) throw e;
-    });
-
-  await run("convert", [ppmPath, "-strip", "-quality", "92", jpgPath], {
-    timeoutMs: 90_000,
-  });
-
-  const buf = fs.readFileSync(jpgPath);
-  const b64 = buf.toString("base64");
-
-  try {
-    fs.unlinkSync(ppmPath);
-  } catch {}
-  try {
-    fs.unlinkSync(jpgPath);
-  } catch {}
-
-  return b64;
-}
-
-// -------------------------------------------------------------
-// Existing JSON endpoints (JPEG/base64)
+// JSON endpoints (JPEG/base64)
 // -------------------------------------------------------------
 app.post("/api/ai/transform-image", async (req, res) => {
   try {
     const { imageBase64, instruction, aspectRatio } = req.body || {};
     requireBodyFields(req.body, ["imageBase64", "instruction"]);
+    validateImageBase64(imageBase64);
 
     const img = await callGeminiImage(
       [
@@ -305,6 +248,7 @@ app.post("/api/ai/combine-images", async (req, res) => {
     if (!Array.isArray(imagesBase64) || imagesBase64.length < 2) {
       throw new Error("NEED_AT_LEAST_2_IMAGES");
     }
+    imagesBase64.forEach(validateImageBase64);
 
     const parts = imagesBase64.map((d) => ({
       inlineData: { data: d, mimeType: "image/jpeg" },
@@ -322,8 +266,9 @@ app.post("/api/ai/apply-watermark", async (req, res) => {
   try {
     const { imageBase64, watermarkText } = req.body || {};
     requireBodyFields(req.body, ["imageBase64", "watermarkText"]);
+    validateImageBase64(imageBase64);
 
-    const prompt = `Apply a professional transparent text watermark that says "${watermarkText}". Place it subtly in the bottom right corner. Blend it with image lighting. IMAGE ONLY.`;
+    const prompt = `Apply a professional transparent text watermark that says "${watermarkText}". Place it subtly in the bottom right corner. Blend it with image lighting. Do not modify any part of the image content. IMAGE ONLY.`;
 
     const img = await callGeminiImage([
       { inlineData: { data: imageBase64, mimeType: "image/jpeg" } },
@@ -340,9 +285,15 @@ app.post("/api/ai/super-process", async (req, res) => {
   try {
     const { imageBase64 } = req.body || {};
     requireBodyFields(req.body, ["imageBase64"]);
+    validateImageBase64(imageBase64);
 
-    const prompt =
-      "ACT AS PRO PHOTO ENGINE. High fidelity 16-bit reconstruction. Professional lighting pass. IMAGE ONLY.";
+    const prompt = `ACT AS A PROFESSIONAL PHOTO RETOUCHING ENGINE.
+Perform high-fidelity enhancement:
+- Improve lighting balance and dynamic range
+- Enhance micro-contrast and color depth
+- Reduce noise while preserving fine detail
+- Apply subtle professional color grading
+OUTPUT the enhanced image. IMAGE ONLY.`;
 
     const img = await callGeminiImage([
       { inlineData: { data: imageBase64, mimeType: "image/jpeg" } },
@@ -359,11 +310,10 @@ app.post("/api/ai/heal-spot", async (req, res) => {
   try {
     const { imageBase64, x, y, radius } = req.body || {};
     requireBodyFields(req.body, ["imageBase64", "x", "y"]);
+    validateImageBase64(imageBase64);
 
     const r = Number(radius ?? 15);
-    const prompt = `HEAL_AREA [X:${Number(x).toFixed(2)}%, Y:${Number(y).toFixed(
-      2
-    )}%, RADIUS:${r}px]. Reconstruct the area. IMAGE ONLY.`;
+    const prompt = `Remove the blemish/imperfection at position [X:${Number(x).toFixed(2)}%, Y:${Number(y).toFixed(2)}%] within a ${r}px radius. Reconstruct the area seamlessly using surrounding texture. Do not alter anything outside the specified area. IMAGE ONLY.`;
 
     const img = await callGeminiImage([
       { inlineData: { data: imageBase64, mimeType: "image/jpeg" } },
@@ -380,6 +330,7 @@ app.post("/api/ai/analyze-image", async (req, res) => {
   try {
     const { imageBase64 } = req.body || {};
     requireBodyFields(req.body, ["imageBase64"]);
+    validateImageBase64(imageBase64);
 
     const ai = getAI();
     const prompt =
@@ -424,7 +375,7 @@ app.post("/api/ai/analyze-image", async (req, res) => {
   }
 });
 
-// Global error handler (keeps logs helpful on Render)
+// Global error handler
 app.use((err, _req, res, _next) => {
   const msg = String(err?.message || err || "SERVER_ERROR");
   console.error("[photogenix-backend] error:", msg);
@@ -435,5 +386,8 @@ app.listen(PORT, "0.0.0.0", () => {
   console.log(`[photogenix-backend] listening on http://localhost:${PORT}`);
   console.log(
     `[photogenix-backend] CORS_ORIGIN=${ALLOWED_ORIGINS.join(",") || "(none)"}`
+  );
+  console.log(
+    `[photogenix-backend] API_KEY_AUTH=${APP_API_KEY ? "ENABLED" : "DISABLED (set APP_API_KEY to enable)"}`
   );
 });

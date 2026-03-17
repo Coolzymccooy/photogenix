@@ -8,6 +8,19 @@ const BLOB_STORE_NAME = 'media_blobs';
 // Memory cache to prevent constant re-generation of Blob URLs
 const urlRegistry = new Map<string, string>();
 
+/**
+ * Revoke all blob URLs for a given item (cleanup on removal)
+ */
+function revokeItemUrls(id: string) {
+  for (const type of ['orig', 'proc'] as const) {
+    const key = `${id}_${type}`;
+    if (urlRegistry.has(key)) {
+      URL.revokeObjectURL(urlRegistry.get(key)!);
+      urlRegistry.delete(key);
+    }
+  }
+}
+
 export const StorageService = {
   openDB: (): Promise<IDBDatabase> => {
     return new Promise((resolve, reject) => {
@@ -79,6 +92,32 @@ export const StorageService = {
     const url = URL.createObjectURL(blob);
     urlRegistry.set(key, url);
     return url;
+  },
+
+  /**
+   * Remove an item's blobs from IndexedDB and revoke its URLs
+   */
+  removeItem: async (id: string): Promise<void> => {
+    revokeItemUrls(id);
+    try {
+      const db = await StorageService.openDB();
+      const tx = db.transaction([BLOB_STORE_NAME], 'readwrite');
+      const store = tx.objectStore(BLOB_STORE_NAME);
+      store.delete(`${id}_orig`);
+      store.delete(`${id}_proc`);
+    } catch (e) {
+      console.warn("Remove item warning:", e);
+    }
+  },
+
+  /**
+   * Revoke all URLs in the registry (call on app unmount)
+   */
+  cleanup: () => {
+    for (const [key, url] of urlRegistry.entries()) {
+      URL.revokeObjectURL(url);
+    }
+    urlRegistry.clear();
   },
 
   saveWorkspace: async (items: ProjectItem[]): Promise<void> => {

@@ -2,8 +2,8 @@
 import React, { useState } from 'react';
 import { ProjectItem } from '../types';
 import { Button } from './ui/Button';
-import { Analytics } from '../services/analyticsService';
-import { X, Download, Check, ArrowLeft, Grid3X3, Tag, Wand2, Share2, Loader2, Play, Zap, ShieldCheck } from 'lucide-react';
+import { X, Download, Check, ArrowLeft, Grid3X3, Tag, Wand2, Share2, Loader2, Play, Zap, ShieldCheck, Package } from 'lucide-react';
+import JSZip from 'jszip';
 
 interface ReviewModalProps {
   isOpen: boolean;
@@ -20,6 +20,8 @@ export const ReviewModal: React.FC<ReviewModalProps> = ({
 }) => {
   const [sharingId, setSharingId] = useState<string | null>(null);
   const [copySuccessId, setCopySuccessId] = useState<string | null>(null);
+  const [isExporting, setIsExporting] = useState(false);
+  const [exportProgress, setExportProgress] = useState(0);
 
   if (!isOpen) return null;
 
@@ -39,7 +41,51 @@ export const ReviewModal: React.FC<ReviewModalProps> = ({
             setCopySuccessId(item.id);
             setTimeout(() => setCopySuccessId(null), 2000);
         }
-    } catch (err) { alert("Share failed"); } finally { setSharingId(null); }
+    } catch (err) { console.error("Share failed:", err); } finally { setSharingId(null); }
+  };
+
+  const handleBatchExport = async () => {
+    if (isExporting || items.length === 0) return;
+    setIsExporting(true);
+    setExportProgress(0);
+
+    try {
+      const zip = new JSZip();
+      const folder = zip.folder('photogenix-export');
+
+      for (let i = 0; i < items.length; i++) {
+        const item = items[i];
+        const url = item.processedUrl || item.originalUrl;
+        if (!url) continue;
+
+        try {
+          const resp = await fetch(url);
+          const blob = await resp.blob();
+          const ext = item.mediaType === 'video' ? 'mp4' : (blob.type.includes('png') ? 'png' : 'jpg');
+          const name = `${String(i + 1).padStart(3, '0')}_${item.lastTool || 'original'}.${ext}`;
+          folder!.file(name, blob);
+        } catch (e) {
+          console.warn(`Skip export for ${item.id}:`, e);
+        }
+
+        setExportProgress(Math.round(((i + 1) / items.length) * 100));
+      }
+
+      const content = await zip.generateAsync({ type: 'blob' }, (meta) => {
+        setExportProgress(Math.round(meta.percent));
+      });
+
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(content);
+      a.download = `photogenix-export-${new Date().toISOString().slice(0, 10)}.zip`;
+      a.click();
+      URL.revokeObjectURL(a.href);
+    } catch (e) {
+      console.error("Export failed:", e);
+    } finally {
+      setIsExporting(false);
+      setExportProgress(0);
+    }
   };
 
   return (
@@ -54,7 +100,16 @@ export const ReviewModal: React.FC<ReviewModalProps> = ({
              Review Session ({items.length})
            </h2>
         </div>
-        <Button variant="primary" onClick={onDownloadAll} icon={<Download size={16}/>}>Save All</Button>
+        <div className="flex gap-2">
+          <Button
+            variant="primary"
+            onClick={handleBatchExport}
+            isLoading={isExporting}
+            icon={<Package size={16}/>}
+          >
+            {isExporting ? `EXPORTING ${exportProgress}%` : `EXPORT_ALL (${items.length})`}
+          </Button>
+        </div>
       </div>
 
       <div className="flex-1 overflow-y-auto p-8 custom-scrollbar bg-[#0a0f1e]">
@@ -82,7 +137,7 @@ export const ReviewModal: React.FC<ReviewModalProps> = ({
                         <button onClick={() => handleShare(item)} className="p-1.5 text-slate-400 hover:text-white bg-slate-800 rounded-sm border border-slate-700">
                            {sharingId === item.id ? <Loader2 size={12} className="animate-spin" /> : copySuccessId === item.id ? <Check size={12} /> : <Share2 size={12} />}
                         </button>
-                        <a href={item.processedUrl || item.originalUrl} download className="p-1.5 text-slate-400 hover:text-white bg-slate-800 rounded-sm border border-slate-700">
+                        <a href={item.processedUrl || item.originalUrl} download={`photogenix_${item.id}.jpg`} className="p-1.5 text-slate-400 hover:text-white bg-slate-800 rounded-sm border border-slate-700">
                            <Download size={12} />
                         </a>
                      </div>

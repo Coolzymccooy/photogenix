@@ -1,12 +1,8 @@
 /**
- * PHOTOGENIX FRONTEND - DEPLOYMENT GUIDE
+ * PHOTOGENIX FRONTEND
  * -----------------------------------------------------------------
- * LOCAL: Run `npm run dev`. Ensure VITE_API_BASE is set if your backend
- * is not on the same origin (e.g. Render).
- *
- * Production on Vercel:
- *   - Set VITE_API_BASE=https://photogenix-2.onrender.com/api
- *   - Backend must allow CORS for https://photogenix-one.vercel.app
+ * Desktop + Web photo editing studio with local Sharp processing
+ * and AI-powered tools via Gemini.
  * -----------------------------------------------------------------
  */
 
@@ -24,16 +20,14 @@ import { CreationModal } from './components/CreationModal';
 import { AILens } from './components/AILens';
 import { Button } from './components/ui/Button';
 
-
-// ✅ RAW: use multipart to avoid base64 payload blowups
 import {
   transformImage,
   transformVideoMock,
   superProcess,
-  combineImages,
   healSpot,
   applyWatermark,
   developRawFile,
+  localProcess,
 } from './services/geminiService';
 
 import { AuthService, UserProfile } from './services/authService';
@@ -46,8 +40,15 @@ type ViewState = 'landing' | 'app';
 
 const RAW_EXTENSIONS = ['dng', 'cr2', 'cr3', 'nef', 'nrw', 'arw', 'sr2', 'srf', 'raf', 'orf', 'rw2', 'pef', 'srw', '3fr', 'fff', 'iiq', 'mos', 'gpr'];
 
+// Tools that can be processed locally via Sharp (instant, no AI round-trip)
+const LOCAL_TOOLS = new Set<ToolType>([
+  'enhance', 'clean', 'sharpness', 'watermark', 'smart-crop',
+]);
+
+
 /**
- * Small concurrency limiter (so bulk RAW doesn't DOS your backend)
+ * Concurrency limiter for bulk operations.
+ * Increased from 2 -> 4 for better throughput on desktop.
  */
 async function runWithLimit<T, R>(
   items: T[],
@@ -57,10 +58,19 @@ async function runWithLimit<T, R>(
   const results: R[] = [];
   let idx = 0;
 
-  const runners = Array.from({ length: Math.max(1, limit) }, async () => {
+  const runners = Array.from({ length: Math.min(items.length, Math.max(1, limit)) }, async () => {
     while (idx < items.length) {
       const my = idx++;
-      results[my] = await worker(items[my]);
+      try {
+        results[my] = await worker(items[my]);
+      } catch (e) {
+        // Retry once on failure
+        try {
+          results[my] = await worker(items[my]);
+        } catch (retryErr) {
+          throw retryErr;
+        }
+      }
     }
   });
 
@@ -80,15 +90,15 @@ const App: React.FC = () => {
   const [activeMediaType, setActiveMediaType] = useState<MediaType>('image');
   const [loadingMessage, setLoadingMessage] = useState("DECODING_STREAM...");
   const [lastOpTime, setLastOpTime] = useState(0);
-  const [avgLoadTime, setAvgLoadTime] = useState(0);
   const [spotRadius, setSpotRadius] = useState(15);
 
   const [isReviewOpen, setIsReviewOpen] = useState(false);
   const [isLensOpen, setIsLensOpen] = useState(false);
   const [isHelpOpen, setIsHelpOpen] = useState(false);
   const [isCreationOpen, setIsCreationOpen] = useState(false);
+  const [isDragOver, setIsDragOver] = useState(false);
 
-  // ✅ Keep RAW File objects in-memory (cannot persist reliably)
+  // Keep RAW File objects in-memory (cannot persist reliably)
   const rawFileByIdRef = useRef<Map<string, File>>(new Map());
 
   const loadSession = useCallback(async () => {
@@ -109,8 +119,8 @@ const App: React.FC = () => {
 
   useEffect(() => {
     loadSession();
-    setAvgLoadTime(Analytics.getAverageLoadTime());
   }, [loadSession]);
+
 
   const saveTimeout = useRef<any>(null);
   useEffect(() => {
@@ -136,11 +146,17 @@ const App: React.FC = () => {
     const cached = rawFileByIdRef.current.get(item.id);
     if (cached) return cached;
 
-    // Fallback: fetch from the object URL (works as long as the tab is still alive)
+    // Fallback: fetch from the object URL or IndexedDB blob
+    const blob = await StorageService.getBlob(item.id, 'orig');
+    if (blob) {
+      const ext = item.fileExtension || "dng";
+      return new File([blob], `upload.${ext}`, { type: blob.type || "application/octet-stream" });
+    }
+
     const resp = await fetch(item.originalUrl);
-    const blob = await resp.blob();
+    const fetchedBlob = await resp.blob();
     const ext = item.fileExtension || "dng";
-    return new File([blob], `upload.${ext}`, { type: blob.type || "application/octet-stream" });
+    return new File([fetchedBlob], `upload.${ext}`, { type: fetchedBlob.type || "application/octet-stream" });
   }, []);
 
   const autoDevelopRawItems = useCallback(async (rawItems: ProjectItem[]) => {
@@ -149,12 +165,13 @@ const App: React.FC = () => {
     // mark all as developing
     setItems(prev => prev.map(p => rawItems.some(r => r.id === p.id) ? { ...p, status: 'developing' } : p));
 
-    await runWithLimit(rawItems, 2, async (rawItem) => {
+    // Use higher concurrency (4) for bulk RAW processing
+    await runWithLimit(rawItems, 4, async (rawItem) => {
       try {
         const file = await getRawFileForItem(rawItem);
 
         const developed = await developRawFile(file, {
-          prompt: "ACT AS RAW DEVELOPER. Recover highlights & shadows, preserve skin tones, natural color science. IMAGE ONLY.",
+          prompt: "ACT AS RAW DEVELOPER. Recover highlights and shadows with natural tone mapping. Preserve skin tones and natural color science. Maintain all facial features, expressions, and subject identity exactly as captured. Apply professional white balance and exposure correction. IMAGE ONLY.",
         });
 
         // persist processed blob
@@ -163,7 +180,7 @@ const App: React.FC = () => {
         await StorageService.persistBlob(rawItem.id, 'proc', blob);
 
         const historyItem: HistoryItem = {
-          id: Date.now().toString(),
+          id: Date.now().toString() + rawItem.id,
           url: developed.developedUrl,
           prompt: 'RAW_DEVELOPMENT',
           timestamp: Date.now(),
@@ -178,67 +195,151 @@ const App: React.FC = () => {
           checkpoints: [historyItem]
         } : p));
       } catch (err) {
-        console.error("RAW Development Failed:", err);
+        console.error("RAW Development Failed:", rawItem.id, err);
         setItems(prev => prev.map(p => p.id === rawItem.id ? { ...p, status: 'error' } : p));
       }
     });
   }, [getRawFileForItem]);
 
+  /** Core file ingestion — used by both file dialog and drag-and-drop */
+  const processFiles = useCallback(async (files: File[], type: MediaType) => {
+    if (files.length === 0) return;
+    setViewState('app');
+
+    const newItems: ProjectItem[] = [];
+
+    for (const file of files) {
+      const id = crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substring(2, 11);
+      const ext = file.name.split('.').pop()?.toLowerCase() || '';
+      const isRaw = RAW_EXTENSIONS.includes(ext);
+
+      if (isRaw) rawFileByIdRef.current.set(id, file);
+
+      newItems.push({
+        id,
+        mediaType: type,
+        originalUrl: URL.createObjectURL(file),
+        processedUrl: null,
+        status: isRaw ? 'developing' : 'idle',
+        history: [],
+        checkpoints: [],
+        isRaw,
+        fileExtension: ext,
+      });
+    }
+
+    setItems(prev => [...prev, ...newItems]);
+    setSelectedIds([newItems[0].id]);
+    setSessionReady(true);
+
+    // Persist blobs to IndexedDB in background (non-blocking)
+    Promise.all(
+      files.map((file, i) =>
+        StorageService.persistBlob(newItems[i].id, 'orig', file).catch(err =>
+          console.warn("Blob persist warning:", newItems[i].id, err)
+        )
+      )
+    ).catch(() => {});
+
+    // Auto-develop RAW files in the background
+    const rawNewItems = newItems.filter(i => i.isRaw);
+    if (rawNewItems.length > 0) {
+      void autoDevelopRawItems(rawNewItems);
+    }
+  }, [autoDevelopRawItems]);
+
   const handleAddFile = async (type: MediaType) => {
     const input = document.createElement('input');
     input.type = 'file';
-    input.accept = type === 'image' ? 'image/*, .dng, .cr2, .cr3, .nef, .arw' : 'video/*';
+    input.accept = type === 'image' ? 'image/*, .dng, .cr2, .cr3, .nef, .arw, .raf, .orf, .rw2, .pef' : 'video/*';
     input.multiple = true;
-
-    input.onchange = async (e) => {
+    input.onchange = (e) => {
       const files = Array.from((e.target as HTMLInputElement).files || []);
-      if (files.length === 0) return;
-
-      setViewState('app');
-      setSessionReady(false);
-
-      const newItems: ProjectItem[] = [];
-
-      for (const file of files) {
-        const id = Math.random().toString(36).substr(2, 9);
-        const ext = file.name.split('.').pop()?.toLowerCase() || '';
-        const isRaw = RAW_EXTENSIONS.includes(ext);
-
-        // keep RAW file in memory for multipart upload
-        if (isRaw) rawFileByIdRef.current.set(id, file);
-
-        await StorageService.persistBlob(id, 'orig', file);
-
-        newItems.push({
-          id,
-          mediaType: type,
-          originalUrl: URL.createObjectURL(file),
-          processedUrl: null,
-          status: isRaw ? 'developing' : 'idle',
-          history: [],
-          checkpoints: [],
-          isRaw,
-          fileExtension: ext,
-        });
-      }
-
-      setItems(prev => [...prev, ...newItems]);
-      setSelectedIds([newItems[0].id]);
-      setSessionReady(true);
-
-      // Auto-develop RAW in the background (but controlled concurrency)
-      void autoDevelopRawItems(newItems.filter(i => i.isRaw));
+      processFiles(files, type);
     };
-
     input.click();
   };
+
+  // Drag-and-drop handlers
+  const handleDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragOver(true);
+  }, []);
+
+  const handleDragLeave = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragOver(false);
+  }, []);
+
+  const handleDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragOver(false);
+    const files = Array.from(e.dataTransfer.files);
+    if (files.length > 0) {
+      const hasVideo = files.some(f => f.type.startsWith('video/'));
+      processFiles(files, hasVideo ? 'video' : 'image');
+    }
+  }, [processFiles]);
+
+  // Global keyboard shortcuts
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      const mod = e.ctrlKey || e.metaKey;
+      if (!mod) return;
+
+      if (e.key === 'z' && !e.shiftKey) {
+        e.preventDefault();
+        if (currentItem && currentItem.checkpoints.length > 1) {
+          const prev = currentItem.checkpoints[currentItem.checkpoints.length - 2];
+          setItems(its => its.map(p => p.id === currentItem.id ? {
+            ...p,
+            processedUrl: prev.url,
+            checkpoints: p.checkpoints.slice(0, -1),
+          } : p));
+        } else if (currentItem && currentItem.checkpoints.length === 1) {
+          setItems(its => its.map(p => p.id === currentItem.id ? {
+            ...p,
+            processedUrl: null,
+            checkpoints: [],
+          } : p));
+        }
+      } else if (e.key === 'o') {
+        e.preventDefault();
+        handleAddFile('image');
+      } else if (e.key === 's') {
+        e.preventDefault();
+        const url = currentItem?.processedUrl || currentItem?.originalUrl;
+        if (url) {
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = `photogenix_${currentItem?.id || 'export'}.jpg`;
+          a.click();
+        }
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [currentItem, handleAddFile]);
 
   const handleProcess = async (instruction: string, toolLabel: string, isBatch: boolean, extra?: any) => {
     const targets = isBatch ? items.filter(i => selectedIds.includes(i.id)) : [currentItem].filter(Boolean) as ProjectItem[];
     if (targets.length === 0 || isProcessing) return;
 
     setIsProcessing(true);
-    setLoadingMessage(isBatch ? `BATCH_PROCESSING [${targets.length}_FILES]...` : `ENGINE_CALIBRATING [${toolLabel}]...`);
+
+    // Determine if this is a local (Sharp) or AI (Gemini) operation
+    const isLocal = LOCAL_TOOLS.has(activeTool);
+    const toolMode = isLocal ? 'LOCAL' : 'AI';
+    setLoadingMessage(
+      isBatch
+        ? `${toolMode}_BATCH [${targets.length}_FILES]...`
+        : isLocal
+          ? `LOCAL_PROCESSING [${toolLabel}]...`
+          : `AI_PROCESSING [${toolLabel}]...`
+    );
 
     const startTime = Date.now();
     try {
@@ -249,7 +350,12 @@ const App: React.FC = () => {
         try {
           let resultUrl = '';
 
-          if (activeTool === 'watermark' || activeTool === 'logo-gen') {
+          if (isLocal) {
+            // Route to local Sharp processing (instant)
+            resultUrl = await localProcess(sourceUrl, activeTool, {
+              text: extra?.watermarkText || instruction.split(':').pop()?.trim(),
+            });
+          } else if (activeTool === 'watermark' || activeTool === 'logo-gen') {
             resultUrl = await applyWatermark(sourceUrl, instruction.split(':').pop()?.trim() || 'PHOTOGENIX');
           } else if (activeTool === 'aspect-ratio') {
             const ratio = extra?.aspectRatio || instruction.split(':').pop()?.trim();
@@ -271,9 +377,10 @@ const App: React.FC = () => {
           const blob = await resp.blob();
           await StorageService.persistBlob(target.id, 'proc', blob);
 
-          const historyItem: HistoryItem = { id: Date.now().toString(), url: resultUrl, prompt: instruction, timestamp: Date.now(), toolLabel };
+          const historyItem: HistoryItem = { id: Date.now().toString() + target.id, url: resultUrl, prompt: instruction, timestamp: Date.now(), toolLabel };
           return { id: target.id, resultUrl, historyItem };
         } catch (e) {
+          console.error(`Processing failed for ${target.id}:`, e);
           return { id: target.id, error: true as const };
         }
       }));
@@ -361,7 +468,20 @@ const App: React.FC = () => {
   };
 
   return (
-    <div className="flex flex-col h-screen bg-base overflow-hidden">
+    <div
+      className="flex flex-col h-screen bg-base overflow-hidden relative"
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+    >
+      {isDragOver && (
+        <div className="absolute inset-0 z-[200] bg-base/90 backdrop-blur-sm flex items-center justify-center pointer-events-none">
+          <div className="border-2 border-dashed border-signal rounded-sm p-16 text-center animate-pulse">
+            <PackageOpen size={64} className="text-signal mx-auto mb-4" />
+            <span className="text-signal text-xs font-mono uppercase tracking-[0.4em] font-bold">DROP_FILES_TO_IMPORT</span>
+          </div>
+        </div>
+      )}
       {viewState === 'landing' ? (
         <LandingPage
           onGetStarted={() => setIsAuthModalOpen(true)}
@@ -451,7 +571,7 @@ const App: React.FC = () => {
           onAddImage={() => handleAddFile('image')}
           onAddVideo={() => handleAddFile('video')}
           onAddFolder={() => handleAddFile('image')}
-          onRemove={(id) => setItems(prev => prev.filter(i => i.id !== id))}
+          onRemove={(id) => { StorageService.removeItem(id); rawFileByIdRef.current.delete(id); setItems(prev => prev.filter(i => i.id !== id)); }}
         />
       )}
 

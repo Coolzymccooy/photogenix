@@ -82,3 +82,21 @@ __pycache__/
 docker-storage/
 docker-data/
 
+# ===========================
+# ELECTRON DESKTOP BUILD
+# ===========================
+release/
+*.exe
+*.dmg
+*.AppImage
+*.deb
+*.snap
+
+# ===========================
+# CAPACITOR / ANDROID / IOS
+# ===========================
+android/
+ios/
+*.apk
+*.aab
+
